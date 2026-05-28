@@ -16,10 +16,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SilentPatchBully.cpp" />
+    <ClCompile Include="CrashReporter\CrashReporter.cpp" />
+    <ClCompile Include="CrashReporter\SystemInfo.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ModUtils\MemoryMgr.h" />
     <ClInclude Include="PoolsBully.h" />
+    <ClInclude Include="CrashReporter\CrashReporter.h" />
+    <ClInclude Include="CrashReporter\SystemInfo.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="SilentPatch.rc" />

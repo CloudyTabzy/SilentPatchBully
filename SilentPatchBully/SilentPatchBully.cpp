@@ -7,6 +7,7 @@
 #include <windows.h>
 #include "Utils/MemoryMgr.h"
 #include "PoolsBully.h"
+#include "CrashReporter/CrashReporter.h"
 
 #include <cassert>
 
@@ -1046,6 +1047,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 	if ( fdwReason == DLL_PROCESS_ATTACH )
 	{
 		hDLLModule = hinstDLL;
+		CrashReporter::Install( hinstDLL );
 	}
 	return TRUE;
 }

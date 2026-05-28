@@ -21,6 +21,12 @@
     <ClCompile Include="SilentPatchBully.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="CrashReporter\CrashReporter.cpp">
+      <Filter>Source Files\CrashReporter</Filter>
+    </ClCompile>
+    <ClCompile Include="CrashReporter\SystemInfo.cpp">
+      <Filter>Source Files\CrashReporter</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="PoolsBully.h">
@@ -29,6 +35,20 @@
     <ClInclude Include="ModUtils\MemoryMgr.h">
       <Filter>Header Files\Utils</Filter>
     </ClInclude>
+    <ClInclude Include="CrashReporter\CrashReporter.h">
+      <Filter>Header Files\CrashReporter</Filter>
+    </ClInclude>
+    <ClInclude Include="CrashReporter\SystemInfo.h">
+      <Filter>Header Files\CrashReporter</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files\CrashReporter">
+      <UniqueIdentifier>{a1b2c3d4-e5f6-7890-abcd-ef1234567890}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\CrashReporter">
+      <UniqueIdentifier>{b2c3d4e5-f6a7-8901-bcde-f12345678901}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="SilentPatch.rc">
