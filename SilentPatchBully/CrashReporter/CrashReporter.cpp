@@ -271,6 +271,49 @@ namespace CrashReporter
 	}
 
 	// ------------------------------------------------------------------
+	// Enumerate loaded modules
+	// ------------------------------------------------------------------
+	struct ModuleEntry
+	{
+		char name[MAX_PATH];
+		char path[MAX_PATH];
+		uint32_t base;
+		uint32_t size;
+	};
+
+	static int EnumerateModules( ModuleEntry* entries, int maxEntries )
+	{
+		HMODULE hMods[256];
+		DWORD cbNeeded;
+		HANDLE hProcess = GetCurrentProcess();
+		int count = 0;
+
+		if ( EnumProcessModules( hProcess, hMods, sizeof(hMods), &cbNeeded ) )
+		{
+			int numMods = cbNeeded / sizeof(HMODULE);
+			if ( numMods > maxEntries ) numMods = maxEntries;
+			for ( int i = 0; i < numMods; i++ )
+			{
+				MODULEINFO modInfo = {};
+				if ( GetModuleInformation( hProcess, hMods[i], &modInfo, sizeof(modInfo) ) )
+				{
+					entries[count].base = (uint32_t)(uintptr_t)modInfo.lpBaseOfDll;
+					entries[count].size = (uint32_t)modInfo.SizeOfImage;
+
+					char fullPath[MAX_PATH] = {};
+					GetModuleFileNameExA( hProcess, hMods[i], fullPath, MAX_PATH );
+					strncpy_s( entries[count].path, fullPath, _TRUNCATE );
+
+					char* bn = strrchr( fullPath, '\\' );
+					strncpy_s( entries[count].name, bn != nullptr ? bn + 1 : fullPath, _TRUNCATE );
+					count++;
+				}
+			}
+		}
+		return count;
+	}
+
+	// ------------------------------------------------------------------
 	// Write JSON crash report
 	// ------------------------------------------------------------------
 	static void WriteCrashJson( const wchar_t* path, DWORD exceptionCode, PVOID faultAddr,
@@ -278,7 +321,7 @@ namespace CrashReporter
 		const OSInfo& os, const MemoryInfo& mem, const GPUInfo& gpu, const ProcessInfo& proc )
 	{
 		FILE* f = nullptr;
-		if ( _wfopen_s( &f, path, L"w, ccs=UTF-8" ) != 0 || f == nullptr )
+		if ( _wfopen_s( &f, path, L"w" ) != 0 || f == nullptr )
 			return;
 
 		// SilentPatch version
@@ -394,15 +437,45 @@ namespace CrashReporter
 		fprintf( f, "    \"large_address_aware\": %s\n", mem.largeAddressAware ? "true" : "false" );
 		fprintf( f, "  },\n" );
 
+		// modules block
+		ModuleEntry modules[256];
+		int moduleCount = EnumerateModules( modules, 256 );
+		fprintf( f, "  \"modules\": [\n" );
+		for ( int i = 0; i < moduleCount; i++ )
+		{
+			fprintf( f, "    {\n" );
+			fprintf( f, "      \"name\": " );
+			WriteJsonString( f, modules[i].name );
+			fprintf( f, ",\n" );
+			fprintf( f, "      \"base\": \"0x%08X\",\n", modules[i].base );
+			fprintf( f, "      \"size\": %lu\n", modules[i].size );
+			fprintf( f, "    }" );
+			if ( i + 1 < moduleCount ) fprintf( f, "," );
+			fprintf( f, "\n" );
+		}
+		fprintf( f, "  ],\n" );
+
 		// gpu block
 		fprintf( f, "  \"gpu\": {\n" );
-		fprintf( f, "    \"adapter\": " );
-		WriteJsonWString( f, gpu.adapterName );
-		fprintf( f, ",\n" );
-		fprintf( f, "    \"vram_mb\": %llu,\n", gpu.vramMB );
 		fprintf( f, "    \"driver_date\": " );
 		WriteJsonWString( f, gpu.driverDate );
-		fprintf( f, "\n  },\n" );
+		fprintf( f, ",\n" );
+		fprintf( f, "    \"adapters\": [\n" );
+		for ( uint32_t i = 0; i < gpu.adapterCount; i++ )
+		{
+			fprintf( f, "      {\n" );
+			fprintf( f, "        \"name\": " );
+			WriteJsonWString( f, gpu.adapters[i].name );
+			fprintf( f, ",\n" );
+			fprintf( f, "        \"vram_mb\": %llu,\n", gpu.adapters[i].vramMB );
+			fprintf( f, "        \"shared_mb\": %llu,\n", gpu.adapters[i].sharedMB );
+			fprintf( f, "        \"is_integrated\": %s\n", gpu.adapters[i].isIntegrated ? "true" : "false" );
+			fprintf( f, "      }" );
+			if ( i + 1 < gpu.adapterCount ) fprintf( f, "," );
+			fprintf( f, "\n" );
+		}
+		fprintf( f, "    ]\n" );
+		fprintf( f, "  },\n" );
 
 		// process block
 		fprintf( f, "  \"process\": {\n" );
@@ -548,21 +621,21 @@ namespace CrashReporter
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
-		// Build base path next to the ASI file
-		wchar_t asiPath[MAX_PATH];
-		if ( GetModuleFileNameW( g_hModule, asiPath, MAX_PATH ) == 0 )
+		// Build base path in the game executable's directory
+		wchar_t gamePath[MAX_PATH];
+		if ( GetModuleFileNameW( GetModuleHandle(nullptr), gamePath, MAX_PATH ) == 0 )
 		{
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
 		// Strip filename to get directory
-		wchar_t* lastSlash = wcsrchr( asiPath, L'\\' );
+		wchar_t* lastSlash = wcsrchr( gamePath, L'\\' );
 		if ( lastSlash != nullptr )
 			*(lastSlash + 1) = L'\0';
 
 		// Create crash_reports directory
 		wchar_t reportsDir[MAX_PATH];
-		swprintf_s( reportsDir, L"%scrash_reports\\", asiPath );
+		swprintf_s( reportsDir, L"%scrash_reports\\", gamePath );
 		EnsureDirectory( reportsDir );
 
 		// Create timestamped subdirectory

@@ -23,10 +23,20 @@ namespace CrashReporter
 		bool largeAddressAware;
 	};
 
+	struct GPUAdapter
+	{
+		wchar_t name[128];
+		uint64_t vramMB;
+		uint64_t sharedMB;
+		bool isIntegrated;
+	};
+
+	static constexpr size_t MAX_GPU_ADAPTERS = 4;
+
 	struct GPUInfo
 	{
-		wchar_t adapterName[128];
-		uint64_t vramMB;
+		GPUAdapter adapters[MAX_GPU_ADAPTERS];
+		uint32_t adapterCount;
 		wchar_t driverDate[32];
 	};
 

@@ -93,11 +93,92 @@ namespace CrashReporter
 		}
 	}
 
+	// ------------------------------------------------------------------------
+	// GPU classification helpers
+	// ------------------------------------------------------------------------
+	static bool IsAdapterNameKnown( const GPUInfo& info, const wchar_t* name )
+	{
+		for ( uint32_t i = 0; i < info.adapterCount; i++ )
+		{
+			if ( wcsstr( info.adapters[i].name, name ) != nullptr ||
+			     wcsstr( name, info.adapters[i].name ) != nullptr )
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool ClassifyGpuAsIntegrated( const wchar_t* name, uint32_t vendorId )
+	{
+		// Intel: overwhelmingly integrated. Intel Arc is the rare discrete exception.
+		if ( vendorId == 0x8086 )
+		{
+			if ( wcsstr( name, L"Arc" ) != nullptr )
+				return false;
+			return true;
+		}
+
+		// NVIDIA does not make x86 integrated GPUs (Tegra is ARM-only).
+		if ( vendorId == 0x10DE )
+			return false;
+
+		// AMD: APUs (integrated) usually contain "Radeon Graphics" without a model number.
+		//      Discrete cards have model series like RX, HD, R9, R7, etc.
+		if ( vendorId == 0x1002 )
+		{
+			if ( wcsstr( name, L"Radeon Graphics" ) != nullptr &&
+			     wcsstr( name, L"RX" ) == nullptr )
+			{
+				return true;
+			}
+			return false;
+		}
+
+		// Unknown vendor: guess by name heuristics
+		if ( wcsstr( name, L"Intel" ) != nullptr && wcsstr( name, L"Arc" ) == nullptr )
+			return true;
+		if ( wcsstr( name, L"NVIDIA" ) != nullptr || wcsstr( name, L"GeForce" ) != nullptr )
+			return false;
+		if ( wcsstr( name, L"AMD" ) != nullptr || wcsstr( name, L"ATI" ) != nullptr || wcsstr( name, L"Radeon" ) != nullptr )
+		{
+			if ( wcsstr( name, L"Radeon Graphics" ) != nullptr && wcsstr( name, L"RX" ) == nullptr )
+				return true;
+			return false;
+		}
+
+		return false;
+	}
+
+	// Parse a PCI HardwareID/MatchingDeviceId string for the vendor ID.
+	// Expected format: PCI\VEN_10DE&DEV_XXXX...
+	static uint32_t ParseVendorIdFromPciString( const wchar_t* id )
+	{
+		if ( id == nullptr ) return 0;
+		const wchar_t* ven = wcsstr( id, L"VEN_" );
+		if ( ven != nullptr )
+		{
+			wchar_t* end = nullptr;
+			unsigned long val = wcstoul( ven + 4, &end, 16 );
+			if ( end != ven + 4 ) return static_cast<uint32_t>( val );
+		}
+		return 0;
+	}
+
+	// ------------------------------------------------------------------------
+	// Layered GPU detection:
+	//   1) DXGI          – best detail for active adapters (Win7+)
+	//   2) Registry      – catches *all* installed display adapters, including
+	//                      hidden Optimus dGPUs that DXGI omits (Win2000+)
+	//   3) EnumDisplayDevices – legacy GDI fallback (Win2000+)
+	// ------------------------------------------------------------------------
 	void CollectGPUInfo( GPUInfo& out )
 	{
 		memset( &out, 0, sizeof(out) );
 
-		// Try DXGI first (most reliable on Win7+)
+		// ----------------------------------------------------------------
+		// Layer 1: DXGI
+		// ----------------------------------------------------------------
 		HMODULE hDxgi = LoadLibraryW( L"dxgi.dll" );
 		if ( hDxgi != nullptr )
 		{
@@ -105,103 +186,206 @@ namespace CrashReporter
 			auto pCreateDXGIFactory1 = (CreateDXGIFactory1_t)GetProcAddress( hDxgi, "CreateDXGIFactory1" );
 			if ( pCreateDXGIFactory1 != nullptr )
 			{
-				struct IDXGIAdapter;
-				struct IDXGIFactory;
 				const IID IID_IDXGIFactory1 = { 0x770aae78, 0xf26f, 0x4dba, { 0xa8, 0x29, 0x25, 0x3c, 0x83, 0x31, 0x8b, 0xf7 } };
-				IDXGIFactory* pFactory = nullptr;
+				void* pFactory = nullptr;
 				if ( SUCCEEDED( pCreateDXGIFactory1( IID_IDXGIFactory1, (void**)&pFactory ) ) && pFactory != nullptr )
 				{
-					struct IDXGIAdapter1;
-					const IID IID_IDXGIAdapter1 = { 0x29038f61, 0x3839, 0x4626, { 0x91, 0xfd, 0x08, 0x68, 0x79, 0x01, 0x1a, 0x05 } };
-					void* pAdapter = nullptr;
-					// Use vtable call: EnumAdapters1 is at index 7 in IDXGIFactory1
+					struct DXGI_ADAPTER_DESC1
+					{
+						WCHAR Description[128];
+						UINT VendorId;
+						UINT DeviceId;
+						UINT SubSysId;
+						UINT Revision;
+						SIZE_T DedicatedVideoMemory;
+						SIZE_T DedicatedSystemMemory;
+						SIZE_T SharedSystemMemory;
+						LUID AdapterLuid;
+						UINT Flags;
+					};
+
 					using EnumAdapters1_t = HRESULT (__stdcall*)( void*, UINT, void** );
+					using GetDesc1_t = HRESULT (__stdcall*)( void*, DXGI_ADAPTER_DESC1* );
+					using Release_t = ULONG (__stdcall*)( void* );
+
 					void** vtable = *(void***)pFactory;
 					auto pEnumAdapters1 = (EnumAdapters1_t)vtable[7];
-					if ( SUCCEEDED( pEnumAdapters1( pFactory, 0, &pAdapter ) ) && pAdapter != nullptr )
+
+					for ( UINT adapterIndex = 0; adapterIndex < MAX_GPU_ADAPTERS; adapterIndex++ )
 					{
-						// IDXGIAdapter1::GetDesc1 at index 10
-						struct DXGI_ADAPTER_DESC1
-						{
-							WCHAR Description[128];
-							UINT VendorId;
-							UINT DeviceId;
-							UINT SubSysId;
-							UINT Revision;
-							SIZE_T DedicatedVideoMemory;
-							SIZE_T DedicatedSystemMemory;
-							SIZE_T SharedSystemMemory;
-							LUID AdapterLuid;
-							UINT Flags;
-						};
-						using GetDesc1_t = HRESULT (__stdcall*)( void*, DXGI_ADAPTER_DESC1* );
+						void* pAdapter = nullptr;
+						HRESULT hr = pEnumAdapters1( pFactory, adapterIndex, &pAdapter );
+						if ( FAILED( hr ) || pAdapter == nullptr )
+							break;
+
 						void** adapterVtable = *(void***)pAdapter;
 						auto pGetDesc1 = (GetDesc1_t)adapterVtable[10];
+						auto pRelease  = (Release_t)adapterVtable[2];
+
 						DXGI_ADAPTER_DESC1 desc = {};
 						if ( SUCCEEDED( pGetDesc1( pAdapter, &desc ) ) )
 						{
-							wcscpy_s( out.adapterName, desc.Description );
-							out.vramMB = desc.DedicatedVideoMemory / (1024 * 1024);
+							GPUAdapter& gpu = out.adapters[out.adapterCount++];
+							wcscpy_s( gpu.name, desc.Description );
+							gpu.vramMB    = desc.DedicatedVideoMemory / (1024 * 1024);
+							gpu.sharedMB  = desc.SharedSystemMemory / (1024 * 1024);
+							gpu.isIntegrated = ClassifyGpuAsIntegrated( desc.Description, desc.VendorId );
+
+							// Intel iGPUs sometimes report 0 shared memory. Backfill from system RAM.
+							if ( gpu.isIntegrated && gpu.sharedMB == 0 )
+							{
+								MEMORYSTATUSEX ms = { sizeof(ms) };
+								if ( GlobalMemoryStatusEx( &ms ) )
+									gpu.sharedMB = ms.ullTotalPhys / (1024 * 1024);
+							}
 						}
-						// Release adapter
-						using Release_t = ULONG (__stdcall*)( void* );
-						auto pRelease = (Release_t)adapterVtable[2];
 						pRelease( pAdapter );
 					}
-					// Release factory
-					using Release_t = ULONG (__stdcall*)( void* );
-					auto pRelease = (Release_t)vtable[2];
-					pRelease( pFactory );
+
+					auto pReleaseFactory = (Release_t)vtable[2];
+					pReleaseFactory( pFactory );
 				}
 			}
 			FreeLibrary( hDxgi );
 		}
 
-		// Fallback to GDI display device
-		if ( out.adapterName[0] == L'\0' )
+		// ----------------------------------------------------------------
+		// Layer 2: Registry scan of the Display Class GUID.
+		// This enumerates *every* installed display adapter driver,
+		// including Optimus dGPUs that are hidden from DXGI/GDI.
+		// ----------------------------------------------------------------
 		{
-			DISPLAY_DEVICEW dd = { sizeof(dd) };
-			if ( EnumDisplayDevicesW( nullptr, 0, &dd, 0 ) )
+			HKEY hKey;
+			if ( RegOpenKeyExW( HKEY_LOCAL_MACHINE,
+				L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}",
+				0, KEY_READ, &hKey ) == ERROR_SUCCESS )
 			{
-				wcscpy_s( out.adapterName, dd.DeviceString );
+				WCHAR subkeyName[256];
+				DWORD index = 0, nameLen = 256;
+				while ( RegEnumKeyExW( hKey, index++, subkeyName, &nameLen, nullptr, nullptr, nullptr, nullptr ) == ERROR_SUCCESS )
+				{
+					nameLen = 256;
+					HKEY hSubKey;
+					if ( RegOpenKeyExW( hKey, subkeyName, 0, KEY_READ, &hSubKey ) != ERROR_SUCCESS )
+						continue;
+
+					WCHAR driverDesc[256] = {};
+					DWORD size = sizeof(driverDesc);
+					bool hasDesc = (RegQueryValueExW( hSubKey, L"DriverDesc", nullptr, nullptr, (LPBYTE)driverDesc, &size ) == ERROR_SUCCESS);
+
+					// Parse vendor from MatchingDeviceId (PCI\VEN_xxxx&DEV_xxxx...)
+					uint32_t vendorId = 0;
+					WCHAR matchId[256] = {};
+					size = sizeof(matchId);
+					if ( RegQueryValueExW( hSubKey, L"MatchingDeviceId", nullptr, nullptr, (LPBYTE)matchId, &size ) == ERROR_SUCCESS )
+					{
+						vendorId = ParseVendorIdFromPciString( matchId );
+					}
+
+					// Try to read VRAM from HardwareInformation.qwMemorySize (binary QWORD)
+					uint64_t regVramMB = 0;
+					DWORD qwType = 0;
+					ULONGLONG qwMem = 0;
+					DWORD qwSize = sizeof(qwMem);
+					if ( RegQueryValueExW( hSubKey, L"HardwareInformation.qwMemorySize", nullptr, &qwType, (LPBYTE)&qwMem, &qwSize ) == ERROR_SUCCESS )
+					{
+						if ( qwType == REG_BINARY && qwSize == sizeof(ULONGLONG) )
+							regVramMB = qwMem / (1024 * 1024);
+						else if ( qwType == REG_QWORD )
+							regVramMB = qwMem / (1024 * 1024);
+					}
+
+					// If we have a name and it is not already known, add it.
+					if ( hasDesc && driverDesc[0] != L'\0' &&
+					     out.adapterCount < MAX_GPU_ADAPTERS &&
+					     !IsAdapterNameKnown( out, driverDesc ) )
+					{
+						GPUAdapter& gpu = out.adapters[out.adapterCount++];
+						wcscpy_s( gpu.name, driverDesc );
+						gpu.vramMB   = regVramMB;
+						gpu.sharedMB = 0;
+						gpu.isIntegrated = ClassifyGpuAsIntegrated( driverDesc, vendorId );
+					}
+
+					RegCloseKey( hSubKey );
+				}
+				RegCloseKey( hKey );
 			}
 		}
 
-		// Driver date from registry (best effort)
-		HKEY hKey;
-		if ( RegOpenKeyExW( HKEY_LOCAL_MACHINE,
-			L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}",
-			0, KEY_READ, &hKey ) == ERROR_SUCCESS )
+		// ----------------------------------------------------------------
+		// Layer 3: EnumDisplayDevices (legacy fallback)
+		// ----------------------------------------------------------------
 		{
-			WCHAR subkeyName[256];
-			DWORD index = 0, nameLen = 256;
-			while ( RegEnumKeyExW( hKey, index++, subkeyName, &nameLen, nullptr, nullptr, nullptr, nullptr ) == ERROR_SUCCESS )
+			DISPLAY_DEVICEW dd = { sizeof(dd) };
+			for ( DWORD deviceIndex = 0; deviceIndex < MAX_GPU_ADAPTERS; deviceIndex++ )
 			{
-				nameLen = 256;
-				HKEY hSubKey;
-				if ( RegOpenKeyExW( hKey, subkeyName, 0, KEY_READ, &hSubKey ) == ERROR_SUCCESS )
-				{
-					WCHAR driverDesc[256] = {};
-					DWORD size = sizeof(driverDesc);
-					if ( RegQueryValueExW( hSubKey, L"DriverDesc", nullptr, nullptr, (LPBYTE)driverDesc, &size ) == ERROR_SUCCESS )
-					{
-						// Simple substring match
-						if ( wcsstr( out.adapterName, driverDesc ) != nullptr || wcsstr( driverDesc, out.adapterName ) != nullptr )
-						{
-							WCHAR driverDate[32] = {};
-							size = sizeof(driverDate);
-							if ( RegQueryValueExW( hSubKey, L"DriverDate", nullptr, nullptr, (LPBYTE)driverDate, &size ) == ERROR_SUCCESS )
-							{
-								wcscpy_s( out.driverDate, driverDate );
-							}
-							RegCloseKey( hSubKey );
-							break;
-						}
-					}
-					RegCloseKey( hSubKey );
-				}
+				if ( !EnumDisplayDevicesW( nullptr, deviceIndex, &dd, 0 ) )
+					break;
+				if ( dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER )
+					continue;
+				if ( out.adapterCount >= MAX_GPU_ADAPTERS )
+					break;
+				if ( IsAdapterNameKnown( out, dd.DeviceString ) )
+					continue;
+
+				GPUAdapter& gpu = out.adapters[out.adapterCount++];
+				wcscpy_s( gpu.name, dd.DeviceString );
+				gpu.vramMB   = 0;
+				gpu.sharedMB = 0;
+				gpu.isIntegrated = ClassifyGpuAsIntegrated( dd.DeviceString, 0 );
 			}
-			RegCloseKey( hKey );
+		}
+
+		// ----------------------------------------------------------------
+		// Driver date: match against any adapter name
+		// ----------------------------------------------------------------
+		if ( out.adapterCount > 0 )
+		{
+			HKEY hKey;
+			if ( RegOpenKeyExW( HKEY_LOCAL_MACHINE,
+				L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}",
+				0, KEY_READ, &hKey ) == ERROR_SUCCESS )
+			{
+				WCHAR subkeyName[256];
+				DWORD index = 0, nameLen = 256;
+				while ( RegEnumKeyExW( hKey, index++, subkeyName, &nameLen, nullptr, nullptr, nullptr, nullptr ) == ERROR_SUCCESS )
+				{
+					nameLen = 256;
+					HKEY hSubKey;
+					if ( RegOpenKeyExW( hKey, subkeyName, 0, KEY_READ, &hSubKey ) == ERROR_SUCCESS )
+					{
+						WCHAR driverDesc[256] = {};
+						DWORD size = sizeof(driverDesc);
+						if ( RegQueryValueExW( hSubKey, L"DriverDesc", nullptr, nullptr, (LPBYTE)driverDesc, &size ) == ERROR_SUCCESS )
+						{
+							bool matched = false;
+							for ( uint32_t i = 0; i < out.adapterCount; i++ )
+							{
+								if ( wcsstr( out.adapters[i].name, driverDesc ) != nullptr ||
+								     wcsstr( driverDesc, out.adapters[i].name ) != nullptr )
+								{
+									matched = true;
+									break;
+								}
+							}
+							if ( matched )
+							{
+								WCHAR driverDate[32] = {};
+								size = sizeof(driverDate);
+								if ( RegQueryValueExW( hSubKey, L"DriverDate", nullptr, nullptr, (LPBYTE)driverDate, &size ) == ERROR_SUCCESS )
+								{
+									wcscpy_s( out.driverDate, driverDate );
+								}
+								RegCloseKey( hSubKey );
+								break;
+							}
+						}
+						RegCloseKey( hSubKey );
+					}
+				}
+				RegCloseKey( hKey );
+			}
 		}
 	}
 

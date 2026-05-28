@@ -176,6 +176,9 @@ App_Data/*.ldf
 *.bim.layout
 *.bim_*.settings
 
+# Local convenience build script (not part of upstream)
+build.bat
+
 # Microsoft Fakes
 FakesAssemblies/
 

@@ -1041,13 +1041,23 @@ static void InstallHooks()
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
-	UNREFERENCED_PARAMETER(hinstDLL);
 	UNREFERENCED_PARAMETER(lpvReserved);
 
 	if ( fdwReason == DLL_PROCESS_ATTACH )
 	{
 		hDLLModule = hinstDLL;
-		CrashReporter::Install( hinstDLL );
+
+		// Check if the user has opted out of crash telemetry.
+		// INI setting: [SilentPatch] CrashReporter=1 (default, enabled) or 0 (disabled)
+		wchar_t wcIniPath[MAX_PATH];
+		GetModuleFileNameW( hinstDLL, wcIniPath, _countof(wcIniPath) - 3 );
+		PathRenameExtensionW( wcIniPath, L".ini" );
+		int crashReporterOptIn = GetPrivateProfileIntW( L"SilentPatch", L"CrashReporter", 1, wcIniPath );
+
+		if ( crashReporterOptIn != 0 )
+		{
+			CrashReporter::Install( hinstDLL );
+		}
 	}
 	return TRUE;
 }
